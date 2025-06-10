@@ -4,7 +4,9 @@ using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Text.Unicode;
+using System.Windows.Documents;
 using System.Windows.Media;
 
 using SupportedCharCollection = System.Collections.Concurrent.ConcurrentDictionary<int, bool>;
@@ -15,42 +17,95 @@ Stopwatch stopwatch = Stopwatch.StartNew();
 SupportedCharCollection supportedChars = new();
 ConcurrentDictionary<string, SupportedCharCollection> supportedCharsFontMap = new();
 
-void PrintBlockInfo(SupportedCharCollection supportedChars)
-{
-    const int decimalPointMultiplier = 1000;
-    UnicodeBlock lastUnicodeBlock = default;
-    int charCount = 0;
-    foreach (int ch in supportedChars.Keys.Order())
-    {
-        UnicodeBlock currentRange = UnicodeBlock.GetUnicodeBlock(ch);
-        if (lastUnicodeBlock != currentRange)
-        {
-            if (charCount > 0)
-            {
-                int blockSize = lastUnicodeBlock.Size;
-                Console.WriteLine($" - {lastUnicodeBlock.Name}: {charCount} of {blockSize} ({Math.Round((double)charCount / (double)blockSize * 100 * decimalPointMultiplier) / decimalPointMultiplier}%)");
-            }
-            lastUnicodeBlock = currentRange;
-            charCount = 0;
-        }
-        charCount += 1;
-    }
-}
-
 const string CALC_TEXT = "Calculating...";
 int CALC_TEXT_LENGTH = CALC_TEXT.Length;
 string CALC_TEXT_BLANK = new(' ', CALC_TEXT_LENGTH);
 
+//TODO add options/flags/commands for these bools
 bool doCalc = true;
 bool doCalcText = false;
 bool doFontNameCompare = false;
-bool printFontBlockInfo = false;
+bool printFontBlockInfo = true;
 bool printAnyFontBlockInfo = true;
+bool onlyDoBasicMultilingualPlane = true;
+bool doPrintUnknownCodepoints = true;
+
+const int decimalPointMultiplier = 1000;
+
+void PrintBlockInfo(SupportedCharCollection supportedChars)
+{
+    UnicodeBlock lastUnicodeBlock = default;
+    int charCount = 0;
+    List<int> blockCodepoints = [];
+    void WriteBlockInfo()
+    {
+        if (charCount > 0)
+        {
+            if (lastUnicodeBlock.Equals(default(UnicodeBlock)))
+            {
+                Console.WriteLine($" - Unknown Block: {charCount} codepoints");
+                if (doPrintUnknownCodepoints)
+                {
+                    Console.WriteLine($" - Warning! [{blockCodepoints[0].ToUHex()} to {blockCodepoints[charCount - 1].ToUHex()}] Unknown Codepoints: {string.Join(", ", blockCodepoints.Select(a => a.ToUHex()))}");
+                }
+            }
+            else
+            {
+                int blockSize = lastUnicodeBlock.Size;
+                Console.WriteLine($" - [{lastUnicodeBlock.FirstCodePoint.ToUHex()} to {lastUnicodeBlock.LastCodePoint.ToUHex()}] {lastUnicodeBlock.Name}: {charCount} of {blockSize} ({Math.Round((double)charCount / (double)blockSize * 100 * decimalPointMultiplier) / decimalPointMultiplier}%)");
+            }
+        }
+    }
+    foreach (int ch in supportedChars.Keys.Order())
+    {
+        UnicodeBlock currentRange = UnicodeBlock.GetUnicodeBlock(ch);
+        if (!currentRange.Equals(lastUnicodeBlock))
+        {
+            WriteBlockInfo();
+            lastUnicodeBlock = currentRange;
+            charCount = 0;
+            blockCodepoints = [];
+        }
+        blockCodepoints.Add(ch);
+        charCount += 1;
+    }
+    WriteBlockInfo();
+}
+
+int maxDrawableCharacters = 0;
+Task printableCodepointTask = Task.Run(() => {
+    int maxCodepoint = 0x10FFFF;
+    if (onlyDoBasicMultilingualPlane)
+    {
+        maxCodepoint = 0xFFFF;
+    }
+    for (int i = 0; i <= maxCodepoint; ++i)
+    {
+        var cat = CharUnicodeInfo.GetUnicodeCategory(i);
+        switch (cat)
+        {
+        case UnicodeCategory.SpaceSeparator:
+        case UnicodeCategory.LineSeparator:
+        case UnicodeCategory.ParagraphSeparator:
+        case UnicodeCategory.Control:
+        case UnicodeCategory.Format:
+        case UnicodeCategory.Surrogate:
+        case UnicodeCategory.PrivateUse:
+        case UnicodeCategory.OtherNotAssigned:
+            break;
+        default:
+            maxDrawableCharacters += 1;
+            break;
+        }
+    }
+});
 
 Console.WriteLine("Enumerating fonts...");
 //Note: using Parallel.ForEach here makes it run slower
 foreach (FontFamily family in Fonts.SystemFontFamilies)
 {
+    if (supportedCharsFontMap.Count > 30) break;
+
     string familyName = family.Source;
     if (doFontNameCompare)
     {
@@ -77,8 +132,11 @@ foreach (FontFamily family in Fonts.SystemFontFamilies)
             {
                 Parallel.ForEach(glyphTypeface.CharacterToGlyphMap.Keys, fontSupportedChar =>
                 {
-                    supportedChars[fontSupportedChar] = true;
-                    fontSupportedChars[fontSupportedChar] = true;
+                    if (!onlyDoBasicMultilingualPlane || (0 <= fontSupportedChar && fontSupportedChar <= 0xFFFF))
+                    {
+                        supportedChars[fontSupportedChar] = true;
+                        fontSupportedChars[fontSupportedChar] = true;
+                    }
                 });
             }
         }
@@ -101,64 +159,9 @@ if (printAnyFontBlockInfo)
     Console.WriteLine("Supported glyphs in any font:");
     PrintBlockInfo(supportedChars);
 }
-Console.WriteLine("Total supported chars: " + supportedChars.Count);
+Console.Write("Total supported chars: " + supportedChars.Count);
+int charCount = supportedChars.Count;
+printableCodepointTask.Wait();
+Console.WriteLine($" of {maxDrawableCharacters} ({Math.Round((double)charCount / (double)maxDrawableCharacters * 100 * decimalPointMultiplier) / decimalPointMultiplier}%)");
 stopwatch.Stop();
 Console.WriteLine("Calculation duration: " + stopwatch.ElapsedMilliseconds / 1000f + " seconds");
-
-struct UnicodeBlock 
-{
-    private static readonly IEnumerable<UnicodeBlock> EveryUnicodeRange = typeof(UnicodeRanges).GetProperties().Where(a => a.PropertyType.Equals(typeof(UnicodeRange)) && a.Name != "All")
-    .Select(a => new UnicodeBlock(a.Name, (a.GetValue(null) as UnicodeRange)!));
-    static UnicodeBlock()
-    {
-        EveryUnicodeRange = EveryUnicodeRange.Append(new UnicodeBlock("High Surrogates", 0xD800, 0xDB7F));
-        EveryUnicodeRange = EveryUnicodeRange.Append(new UnicodeBlock("High Private Use Surrogates", 0xDB80, 0xDBFF));
-        EveryUnicodeRange = EveryUnicodeRange.Append(new UnicodeBlock("Low Surrogates", 0xDC00, 0xDFFF));
-        EveryUnicodeRange = EveryUnicodeRange.Append(new UnicodeBlock("Private Use Area", 0xE000, 0xF8FF));
-    }
-
-    public static UnicodeBlock GetUnicodeBlock(int codepoint)
-    {
-        return EveryUnicodeRange.FirstOrDefault(block => {
-            return block.Contains(codepoint);
-        });
-    }
-
-    public readonly string Name;
-    public readonly int FirstCodePoint;
-    public readonly int LastCodePoint;
-
-    public readonly int Size => LastCodePoint - FirstCodePoint + 1;
-
-    private UnicodeBlock(string name, UnicodeRange range) : this()
-    {
-        Name = name;
-        FirstCodePoint = range.FirstCodePoint;
-        LastCodePoint = range.FirstCodePoint + range.Length - 1;
-    }
-    private UnicodeBlock(string name, int firstCodePoint, int lastCodePoint) : this()
-    {
-        Name = name;
-        FirstCodePoint = firstCodePoint;
-        LastCodePoint = lastCodePoint;
-    }
-    public readonly bool Contains(int codepoint)
-    {
-        return FirstCodePoint <= codepoint
-            && LastCodePoint >= codepoint;
-    }
-    public override bool Equals([NotNullWhen(true)] object? obj)
-    {
-        return obj != null
-                && obj.GetType().Equals(typeof(UnicodeBlock))
-                && ((UnicodeBlock)obj).Name == Name;
-    }
-    public static bool operator ==(UnicodeBlock first, UnicodeBlock second)
-    {
-        return Equals(first, second);
-    }
-    public static bool operator !=(UnicodeBlock first, UnicodeBlock second)
-    {
-        return !(first == second);
-    }
-}
