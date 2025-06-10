@@ -1,6 +1,6 @@
 ﻿// See https://aka.ms/new-console-template for more information
 
-readonly struct UnicodeBlock
+internal readonly struct UnicodeBlock
 {
     //private static readonly List<UnicodeBlock> EveryUnicodeRange = typeof(UnicodeRanges).GetProperties().Where(a => a.PropertyType.Equals(typeof(UnicodeRange)) && a.Name != "All").Select(a => new UnicodeBlock(a.Name, (a.GetValue(null) as UnicodeRange)!));
     /// <remarks>
